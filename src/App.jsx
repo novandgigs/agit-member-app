@@ -45,15 +45,19 @@ export default function App() {
     }
   ]);
 
-  // 자동 로그인 체크 (앱 최초 실행 시)
+  // 자동 로그인 체크 (앱 최초 실행 시) - Vercel 에러(ESLint)를 피하도록 로직 완벽 수정
   useEffect(() => {
     const savedMemberCode = localStorage.getItem('agit_auto_login');
     if (savedMemberCode) {
-      const user = usersDb.find(u => u.memberCode === savedMemberCode);
-      if (user) {
-        setCurrentUser(user);
-        displayToast('자동 로그인 되었습니다.');
-      }
+      setUsersDb(prevDb => {
+        const user = prevDb.find(u => u.memberCode === savedMemberCode);
+        if (user) {
+          setCurrentUser(user);
+          setShowToast('자동 로그인 되었습니다.');
+          setTimeout(() => setShowToast(''), 3000);
+        }
+        return prevDb;
+      });
     }
   }, []);
 
