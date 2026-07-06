@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { 
-  Home, CalendarPlus, Ticket, User, 
+  Home, CalendarPlus, Ticket,
   Instagram, Youtube, BookOpen, Clock, 
-  CheckCircle2, ChevronRight, AlertCircle, Play
+  CheckCircle2, ChevronRight, AlertCircle
 } from 'lucide-react';
 
 export default function App() {
