@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Home, CalendarPlus, Ticket,
-  Instagram, Youtube, BookOpen, Clock, 
+  BookOpen, Clock, 
   CheckCircle2, ChevronRight, AlertCircle
 } from 'lucide-react';
 
@@ -482,11 +482,20 @@ export default function App() {
               <h3 className="text-sm font-bold text-neutral-400 mb-4 px-1">아지트 소식 & 꿀팁 보러가기</h3>
               <div className="grid grid-cols-3 gap-3">
                 <button className="flex flex-col items-center justify-center gap-2 bg-neutral-900 hover:bg-neutral-800 p-4 rounded-xl border border-neutral-800 transition-colors">
-                  <Instagram className="w-6 h-6 text-pink-500" />
+                  {/* 인스타그램 인라인 SVG */}
+                  <svg className="w-6 h-6 text-pink-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
+                    <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
+                    <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
+                  </svg>
                   <span className="text-xs font-medium">인스타그램</span>
                 </button>
                 <button className="flex flex-col items-center justify-center gap-2 bg-neutral-900 hover:bg-neutral-800 p-4 rounded-xl border border-neutral-800 transition-colors">
-                  <Youtube className="w-6 h-6 text-red-500" />
+                  {/* 유튜브 인라인 SVG */}
+                  <svg className="w-6 h-6 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M22.54 6.42a2.78 2.78 0 0 0-1.95-1.96C18.88 4 12 4 12 4s-6.88 0-8.59.46a2.78 2.78 0 0 0-1.95 1.96A29 29 0 0 0 1 11.54a29 29 0 0 0 .46 5.12 2.78 2.78 0 0 0 1.95 1.96c1.71.46 8.59.46 8.59.46s6.88 0 8.59-.46a2.78 2.78 0 0 0 1.95-1.96 29 29 0 0 0 .46-5.12 29 29 0 0 0-.46-5.12z" />
+                    <polygon points="9.75 15.02 15.5 11.54 9.75 8.06 9.75 15.02" fill="currentColor" />
+                  </svg>
                   <span className="text-xs font-medium">유튜브 릴스</span>
                 </button>
                 <button className="flex flex-col items-center justify-center gap-2 bg-neutral-900 hover:bg-neutral-800 p-4 rounded-xl border border-neutral-800 transition-colors">
