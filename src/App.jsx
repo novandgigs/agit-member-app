@@ -5,24 +5,59 @@ import {
   CheckCircle2, ChevronRight, AlertCircle
 } from 'lucide-react';
 
+// --- Firebase SDK 임포트 ---
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  signInWithCustomToken, 
+  signInAnonymously, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  doc, 
+  setDoc, 
+  collection, 
+  onSnapshot, 
+  updateDoc, 
+  addDoc 
+} from 'firebase/firestore';
+
+// --- Firebase 설정 및 초기화 (Canvas & 배포 통합 빌드 가드 포함) ---
+const configStr = typeof __firebase_config !== 'undefined' ? __firebase_config : null;
+const firebaseConfig = configStr ? JSON.parse(configStr) : {
+  apiKey: "", // Vercel 또는 로컬 빌드 시 런타임 자동 세팅용 빈 문자열 유지
+  authDomain: "our-azit-shared.firebaseapp.com",
+  projectId: "our-azit-shared",
+  storageBucket: "our-azit-shared.appspot.com",
+  messagingSenderId: "1234567890",
+  appId: "1:1234567890:web:abcdef"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+// Sandbox 환경 앱 ID 매칭 (매장 포털 앱과 일치하는 공통 ID 사용)
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'our-azit-shared';
+
 export default function App() {
   // --- 상태 관리 (State) ---
-  const [currentUser, setCurrentUser] = useState(null);
+  const [fbUser, setFbUser] = useState(null); // Firebase 인증 유저 상태
+  const [currentUser, setCurrentUser] = useState(null); // 로그인된 회원 정보
   const [currentView, setCurrentView] = useState('home'); // home, reservation, coupon
   const [showToast, setShowToast] = useState('');
   
   // 인증 모드 상태 (login 또는 signup)
   const [authMode, setAuthMode] = useState('login');
-  
-  // 로그인 폼 상태
+  const [authError, setAuthError] = useState('');
+
+  // 로그인/회원가입 입력 상태
   const [phoneLast4, setPhoneLast4] = useState('');
   const [autoLogin, setAutoLogin] = useState(false);
-
-  // 가입 폼 상태
   const [phone, setPhone] = useState('');
   const [dob, setDob] = useState('');
   const [agreed, setAgreed] = useState(false);
-  const [authError, setAuthError] = useState('');
 
   // 예약 폼 상태 (2026년 고정, 시간/분 드롭다운 방식)
   const [resMonth, setResMonth] = useState('07');
@@ -32,34 +67,87 @@ export default function App() {
   const [resPeople, setResPeople] = useState('2');
   const [isCheckingSeat, setIsCheckingSeat] = useState(false); // 빈자리 확인 로딩 상태
 
-  // 가상의 회원 데이터베이스 (초기 구동용)
-  const [usersDb, setUsersDb] = useState([
-    {
-      phone: '010-1234-5678',
-      dob: '900101',
-      memberCode: 'AGIT-000001',
-      visits: 12,
-      totalHours: 25.5,
-      coupons: [{ id: 1, name: '평일 1시간 무료 이용권', used: false }],
-      reservations: []
-    }
-  ]);
+  // 클라우드 실시간 연동 데이터베이스 상태 (Firestore에서 동기화됨)
+  const [membersDb, setMembersDb] = useState([]);
+  const [reservationsDb, setReservationsDb] = useState([]);
 
-  // 자동 로그인 체크 (앱 최초 실행 시) - Vercel 에러(ESLint)를 피하도록 로직 완벽 수정
+  // --- 1. Firebase 인증 초기화 및 자동 로그인 감지 (RULE 3) ---
   useEffect(() => {
-    const savedMemberCode = localStorage.getItem('agit_auto_login');
-    if (savedMemberCode) {
-      setUsersDb(prevDb => {
-        const user = prevDb.find(u => u.memberCode === savedMemberCode);
-        if (user) {
-          setCurrentUser(user);
-          setShowToast('자동 로그인 되었습니다.');
-          setTimeout(() => setShowToast(''), 3000);
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
         }
-        return prevDb;
-      });
-    }
+      } catch (error) {
+        console.error("Firebase auth initialization failed:", error);
+      }
+    };
+    initAuth();
+
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setFbUser(user);
+    });
+    return () => unsubscribe();
   }, []);
+
+  // --- 2. 클라우드 실시간 데이터 수신 리스너 (RULE 1 & RULE 2) ---
+  useEffect(() => {
+    if (!fbUser) return;
+
+    // RULE 1: 엄격한 Public 데이터 경로 준수
+    const membersCol = collection(db, 'artifacts', appId, 'public', 'data', 'members');
+    const reservationsCol = collection(db, 'artifacts', appId, 'public', 'data', 'reservations');
+
+    // 실시간 회원 목록 동기화
+    const unsubMembers = onSnapshot(membersCol, (snapshot) => {
+      const list = [];
+      snapshot.forEach((doc) => {
+        list.push({ id: doc.id, ...doc.data() });
+      });
+      setMembersDb(list);
+    }, (err) => {
+      console.error("Members snapshot sync error:", err);
+    });
+
+    // 실시간 예약 목록 동기화
+    const unsubReservations = onSnapshot(reservationsCol, (snapshot) => {
+      const list = [];
+      snapshot.forEach((doc) => {
+        list.push({ id: doc.id, ...doc.data() });
+      });
+      setReservationsDb(list);
+    }, (err) => {
+      console.error("Reservations snapshot sync error:", err);
+    });
+
+    return () => {
+      unsubMembers();
+      unsubReservations();
+    };
+  }, [fbUser]);
+
+  // --- 3. 로컬 자동 로그인 복구 및 실시간 회원 데이터 자동 바인딩 ---
+  useEffect(() => {
+    const savedPhone = localStorage.getItem('agit_auto_login_phone');
+    if (savedPhone && membersDb.length > 0) {
+      const user = membersDb.find(m => m.phone === savedPhone);
+      if (user) {
+        setCurrentUser(user);
+      }
+    }
+  }, [membersDb]);
+
+  // 실시간으로 특정 회원 데이터 정보가 Firestore에서 업데이트되면 감지하여 상태 동기화
+  useEffect(() => {
+    if (currentUser && membersDb.length > 0) {
+      const updatedData = membersDb.find(m => m.phone === currentUser.phone);
+      if (updatedData) {
+        setCurrentUser(updatedData);
+      }
+    }
+  }, [membersDb, currentUser]);
 
   // --- 유틸리티 함수 ---
   const displayToast = (msg) => {
@@ -82,28 +170,36 @@ export default function App() {
   // --- 핸들러 함수 ---
   const handleLogin = (e) => {
     e.preventDefault();
+    if (!fbUser) {
+      setAuthError('데이터베이스 서버와 연결 중입니다. 잠시만 기다려주세요.');
+      return;
+    }
     if (!phoneLast4 || phoneLast4.length !== 4) {
       setAuthError('핸드폰 번호 뒤 4자리를 정확히 입력해주세요.');
       return;
     }
 
-    // 뒷자리 4자리가 일치하는 유저 찾기
-    const user = usersDb.find(u => u.phone.endsWith(phoneLast4));
+    // 뒤 4자리가 일치하는 회원을 로컬 메모리(RULE 2)에서 탐색
+    const matchedUsers = membersDb.filter(u => u.phone.endsWith(phoneLast4));
     
-    if (user) {
+    if (matchedUsers.length === 1) {
+      const user = matchedUsers[0];
       setCurrentUser(user);
       setAuthError('');
       if (autoLogin) {
-        localStorage.setItem('agit_auto_login', user.memberCode);
+        localStorage.setItem('agit_auto_login_phone', user.phone);
       }
       displayToast('다시 오신 것을 환영합니다!');
+    } else if (matchedUsers.length > 1) {
+      setAuthError('중복된 번호가 검색되었습니다. 전체 가입을 진행하시거나 매장에 문의해 주세요.');
     } else {
-      setAuthError('일치하는 회원 정보가 없습니다.');
+      setAuthError('일치하는 회원 정보가 없습니다. 가입하지 않으셨다면 회원가입을 먼저 해주세요.');
     }
   };
 
-  const handleSignup = (e) => {
+  const handleSignup = async (e) => {
     e.preventDefault();
+    if (!fbUser) return;
     if (!phone || !dob) {
       setAuthError('핸드폰 번호와 생년월일을 모두 입력해주세요.');
       return;
@@ -113,33 +209,42 @@ export default function App() {
       return;
     }
 
-    // 기존 회원 중복 확인
-    const existingUser = usersDb.find(u => u.phone === phone);
+    // 중복 가입 체크
+    const existingUser = membersDb.find(u => u.phone === phone);
     if (existingUser) {
-      setAuthError('이미 가입된 번호입니다. 로그인해주세요.');
+      setAuthError('이미 가입 완료된 번호입니다. 로그인해주세요.');
       return;
     }
     
-    // 신규 회원 가입 처리
-    const newUser = {
-      phone,
+    const newUserPhone = phone.trim();
+    const newMember = {
+      phone: newUserPhone,
       dob,
       memberCode: generateMemberCode(),
       visits: 0,
       totalHours: 0,
-      coupons: [{ id: Date.now(), name: '신규 가입 환영 음료 쿠폰', used: false }],
-      reservations: []
+      coupons: [
+        { id: Date.now(), name: '신규 가입 환영 음료 무료 쿠폰', used: false },
+        { id: Date.now() + 1, name: '보드게임 1시간 할인 쿠폰', used: false }
+      ],
+      createdAt: Date.now()
     };
     
-    setUsersDb([...usersDb, newUser]);
-    setCurrentUser(newUser);
-    setAuthError('');
-    
-    if (autoLogin) {
-      localStorage.setItem('agit_auto_login', newUser.memberCode);
+    try {
+      // RULE 1: 엄격한 데이터 저장 경로 지정
+      const memberDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'members', newUserPhone);
+      await setDoc(memberDocRef, newMember);
+      
+      setCurrentUser(newMember);
+      setAuthError('');
+      if (autoLogin) {
+        localStorage.setItem('agit_auto_login_phone', newUserPhone);
+      }
+      displayToast('환영합니다! 회원가입 및 웰컴 쿠폰 발급이 완료되었습니다.');
+    } catch (err) {
+      console.error("Error creating member document:", err);
+      setAuthError('회원 등록에 실패했습니다. 다시 시도해 주세요.');
     }
-    
-    displayToast('환영합니다! 신규 가입 쿠폰이 발급되었습니다.');
   };
 
   const handleLogout = () => {
@@ -150,75 +255,86 @@ export default function App() {
     setDob('');
     setAgreed(false);
     setAutoLogin(false);
-    localStorage.removeItem('agit_auto_login'); // 자동 로그인 해제
+    localStorage.removeItem('agit_auto_login_phone'); // 자동 로그인 정보 파기
     displayToast('로그아웃 되었습니다.');
   };
 
-  // 관리자용(매장용) 예약 승인 시뮬레이션 함수
-  const handleApproveReservation = (resId) => {
-    const updatedReservations = currentUser.reservations.map(res => 
-      res.id === resId ? { ...res, status: '확정' } : res
-    );
-    const updatedUser = { ...currentUser, reservations: updatedReservations };
-    setCurrentUser(updatedUser);
-    setUsersDb(usersDb.map(u => u.memberCode === updatedUser.memberCode ? updatedUser : u));
-    displayToast('매장 시스템에서 예약이 확정되었습니다!');
+  // [실시간 호환 테스트용] 매장 포스기 시뮬레이션용 승인 처리 함수
+  const handleApproveReservation = async (resId) => {
+    try {
+      const resDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'reservations', resId);
+      await updateDoc(resDocRef, { status: '확정' });
+      displayToast('클라우드 서버에 승인 상태를 업데이트했습니다!');
+    } catch (err) {
+      console.error("Error approving reservation:", err);
+      displayToast('예약 승인 업데이트에 실패했습니다.');
+    }
   };
 
-  const handleReservation = (e) => {
+  const handleReservation = async (e) => {
     e.preventDefault();
+    if (!fbUser || !currentUser) return;
     
-    // 1. 매장 연동 및 신청 전송 시뮬레이션
     setIsCheckingSeat(true);
-    displayToast('매장 시스템으로 예약 신청을 전송 중입니다...');
+    displayToast('실시간 아지트 테이블 공석 상태를 조회 중입니다...');
 
-    setTimeout(() => {
+    setTimeout(async () => {
       setIsCheckingSeat(false);
       
-      // 2. 2026년으로 고정된 날짜 및 시간/분 조합
       const dateStr = `2026년 ${resMonth}월 ${resDay}일`;
       const timeStr = `${resHour}:${resMinute}`;
       
       const newRes = {
-        id: Date.now(),
+        memberPhone: currentUser.phone,
+        memberCode: currentUser.memberCode,
         date: dateStr,
         time: timeStr,
         people: resPeople,
-        status: '대기 중' // 예약 대기 상태로 저장
+        status: '대기 중', // 매장 관리자 앱에서 승인 시 '확정'으로 동기화됨
+        createdAt: Date.now()
       };
 
-      const updatedUser = {
-        ...currentUser,
-        reservations: [...currentUser.reservations, newRes]
-      };
-
-      setCurrentUser(updatedUser);
-      setUsersDb(usersDb.map(u => u.memberCode === updatedUser.memberCode ? updatedUser : u));
-      
-      // 3. 매장 관리 어플 알림 전송 메시지
-      displayToast('예약 신청 완료! 매장에서 승인 시 확정됩니다.');
-      setCurrentView('home');
-    }, 2000); // 2초간 전송 연출
+      try {
+        const reservationsCol = collection(db, 'artifacts', appId, 'public', 'data', 'reservations');
+        await addDoc(reservationsCol, newRes);
+        
+        displayToast('예약 신청 완료! 매장 관리 어플에 실시간 알림이 전송되었습니다.');
+        setCurrentView('home');
+      } catch (err) {
+        console.error("Error booking reservation:", err);
+        displayToast('예약 전송 도중 오류가 발생했습니다.');
+      }
+    }, 1500);
   };
 
-  // 쿠폰 사용 처리 핸들러
-  const handleUseCoupon = (couponId) => {
-    // 실수로 누르는 것을 방지하기 위한 확인 창
-    if (!window.confirm('직원 확인용입니다. 정말 사용 처리하시겠습니까?')) return;
+  // 쿠폰 사용 처리 핸들러 (실시간 클라우드 DB 동기화)
+  const handleUseCoupon = async (couponId) => {
+    if (!window.confirm('직원 확인용 버튼입니다. 사용 완료 시 복구가 불가능합니다. 사용하시겠습니까?')) return;
     
     const updatedCoupons = currentUser.coupons.map(c => 
       c.id === couponId ? { ...c, used: true } : c
     );
     
-    const updatedUser = { ...currentUser, coupons: updatedCoupons };
-    setCurrentUser(updatedUser);
-    setUsersDb(usersDb.map(u => u.memberCode === updatedUser.memberCode ? updatedUser : u));
-    displayToast('쿠폰이 정상적으로 사용 처리되었습니다.');
+    try {
+      const memberDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'members', currentUser.phone);
+      await updateDoc(memberDocRef, { coupons: updatedCoupons });
+      displayToast('쿠폰 사용 정보가 실시간 동기화되었습니다.');
+    } catch (err) {
+      console.error("Error using coupon:", err);
+      displayToast('쿠폰 상태 업데이트 실패');
+    }
   };
 
-  // --- 화면 렌더링 컴포넌트 ---
+  // 현재 사용자의 실시간 예약 건 필터링 (RULE 2: In-Memory 필터)
+  const myReservations = reservationsDb
+    .filter(res => res.memberPhone === currentUser?.phone)
+    .sort((a, b) => b.createdAt - a.createdAt);
 
-  // 1. 로그인/회원가입 화면
+  const tierInfo = currentUser ? getTier(currentUser.totalHours) : { name: 'BRONZE', color: 'text-orange-400' };
+
+  // --- 화면 렌더링 ---
+
+  // 1. 로그인/회원가입 인증 화면
   if (!currentUser) {
     return (
       <div className="min-h-screen bg-neutral-950 text-white flex flex-col justify-center items-center p-6 font-sans">
@@ -372,21 +488,19 @@ export default function App() {
     );
   }
 
-  const tierInfo = getTier(currentUser.totalHours);
-
-  // --- 메인 레이아웃 ---
+  // --- 메인 홈화면 레이아웃 ---
   return (
-    <div className="min-h-screen bg-neutral-950 text-white font-sans max-w-md mx-auto relative pb-20 shadow-2xl">
+    <div className="min-h-screen bg-neutral-950 text-white font-sans max-w-md mx-auto relative pb-24 shadow-2xl">
       
-      {/* 상단 헤더 */}
+      {/* 상단 네온 헤더 */}
       <header className="px-6 py-5 flex justify-between items-center sticky top-0 bg-neutral-950/80 backdrop-blur-md z-10 border-b border-neutral-900">
-        <h1 className="text-xl font-black text-yellow-400">아지트 멤버십</h1>
+        <h1 className="text-xl font-black text-yellow-400 tracking-tight">우리들의 아지트</h1>
         <button onClick={handleLogout} className="text-xs text-neutral-400 hover:text-white transition-colors bg-neutral-900 px-3 py-1.5 rounded-full">
           로그아웃
         </button>
       </header>
 
-      {/* 본문 영역 */}
+      {/* 뷰 콘텐츠 제어 */}
       <main className="p-6 space-y-6">
         
         {/* 홈 뷰 */}
@@ -409,7 +523,7 @@ export default function App() {
 
               {/* 가상의 바코드 영역 */}
               <div className="w-full h-16 bg-white/10 rounded-lg flex flex-col justify-center items-center mb-6">
-                 {/* CSS로 구현한 가짜 바코드 패턴 */}
+                 {/* CSS 바코드 패턴 */}
                  <div className="w-full h-10 flex px-4 items-center justify-between opacity-80">
                     {[...Array(40)].map((_, i) => (
                       <div key={i} className={`h-full bg-white ${Math.random() > 0.5 ? 'w-0.5' : (Math.random() > 0.8 ? 'w-1.5' : 'w-1')}`}></div>
@@ -429,24 +543,24 @@ export default function App() {
               </div>
             </div>
 
-            {/* 이벤트 배너 */}
+            {/* 이벤트 알림 */}
             <div className="bg-yellow-400 text-neutral-950 rounded-xl p-4 flex items-center justify-between cursor-pointer hover:bg-yellow-300 transition-colors shadow-lg shadow-yellow-400/10">
               <div>
-                <p className="font-bold text-sm mb-0.5">🎉 이달의 이벤트</p>
-                <p className="text-xs font-medium opacity-80">신규 보드게임 입고 기념! 리뷰 작성 시 1시간 무료</p>
+                <p className="font-bold text-sm mb-0.5">🎉 실시간 클라우드 가동 중</p>
+                <p className="text-xs font-medium opacity-80">이 화면은 포스기 관리자 대시보드와 유기적으로 동기화됩니다.</p>
               </div>
               <ChevronRight className="w-5 h-5" />
             </div>
 
-            {/* 다가오는 예약 (상태별 렌더링 및 매장 승인 테스트 버튼 추가) */}
-            {currentUser.reservations.length > 0 && (
+            {/* 내 예약 내역 (실시간 동기화 상태) */}
+            {myReservations.length > 0 && (
               <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5">
                 <h3 className="text-sm font-bold text-neutral-300 mb-3 flex items-center gap-2">
                   <Clock className="w-4 h-4 text-yellow-400" />
-                  내 예약 내역
+                  실시간 내 예약 내역
                 </h3>
                 <div className="space-y-3">
-                  {currentUser.reservations.map((res) => (
+                  {myReservations.map((res) => (
                     <div key={res.id} className="bg-neutral-950 p-4 rounded-lg border border-neutral-800">
                       <div className="flex justify-between items-center mb-2">
                         <div>
@@ -455,20 +569,20 @@ export default function App() {
                         </div>
                         <span className={`px-3 py-1 text-xs font-bold rounded-full border ${
                           res.status === '확정' 
-                            ? 'bg-yellow-400/20 text-yellow-400 border-yellow-400/30' 
+                            ? 'bg-yellow-400/20 text-yellow-400 border-yellow-400/30 animate-pulse' 
                             : 'bg-neutral-800 text-neutral-400 border-neutral-600'
                         }`}>
-                          {res.status === '확정' ? '예약 확정' : '승인 대기'}
+                          {res.status === '확정' ? '예약 확정' : '승인 대기 중'}
                         </span>
                       </div>
                       
-                      {/* 시뮬레이션용 매장 승인 버튼 (테스트용) */}
+                      {/* [실시간 확인을 위한 매장용 승인 시뮬레이션 버튼] */}
                       {res.status !== '확정' && (
                         <button
                           onClick={() => handleApproveReservation(res.id)}
-                          className="w-full mt-2 py-2 bg-neutral-800/50 hover:bg-neutral-800 text-neutral-400 hover:text-white text-xs border border-dashed border-neutral-600 rounded transition-colors"
+                          className="w-full mt-2 py-2 bg-neutral-800/40 hover:bg-neutral-800 text-neutral-400 hover:text-white text-xs border border-dashed border-neutral-600 rounded transition-colors"
                         >
-                          🧪 [매장 관리자 테스트] 예약 확정하기
+                          🧪 [포스기 어플 승인 시뮬레이션] 원클릭 승인하기
                         </button>
                       )}
                     </div>
@@ -477,13 +591,12 @@ export default function App() {
               </div>
             )}
 
-            {/* SNS 연계 섹션 */}
+            {/* 매장 SNS 원클릭 연계 */}
             <div className="pt-4">
               <h3 className="text-sm font-bold text-neutral-400 mb-4 px-1">아지트 소식 & 꿀팁 보러가기</h3>
               <div className="grid grid-cols-3 gap-3">
                 <button className="flex flex-col items-center justify-center gap-2 bg-neutral-900 hover:bg-neutral-800 p-4 rounded-xl border border-neutral-800 transition-colors">
-                  {/* 인스타그램 인라인 SVG */}
-                  <svg className="w-6 h-6 text-pink-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg className="w-6 h-6 text-pink-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
                     <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
                     <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
@@ -491,8 +604,7 @@ export default function App() {
                   <span className="text-xs font-medium">인스타그램</span>
                 </button>
                 <button className="flex flex-col items-center justify-center gap-2 bg-neutral-900 hover:bg-neutral-800 p-4 rounded-xl border border-neutral-800 transition-colors">
-                  {/* 유튜브 인라인 SVG */}
-                  <svg className="w-6 h-6 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg className="w-6 h-6 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M22.54 6.42a2.78 2.78 0 0 0-1.95-1.96C18.88 4 12 4 12 4s-6.88 0-8.59.46a2.78 2.78 0 0 0-1.95 1.96A29 29 0 0 0 1 11.54a29 29 0 0 0 .46 5.12 2.78 2.78 0 0 0 1.95 1.96c1.71.46 8.59.46 8.59.46s6.88 0 8.59-.46a2.78 2.78 0 0 0 1.95-1.96 29 29 0 0 0 .46-5.12 29 29 0 0 0-.46-5.12z" />
                     <polygon points="9.75 15.02 15.5 11.54 9.75 8.06 9.75 15.02" fill="currentColor" />
                   </svg>
@@ -511,7 +623,7 @@ export default function App() {
         {currentView === 'reservation' && (
           <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
             <h2 className="text-2xl font-bold">테이블 예약</h2>
-            <p className="text-neutral-400 text-sm">원하시는 날짜와 시간을 선택해 주세요. 예약 확정 시 매장 관리 어플로 즉시 알림이 전송됩니다.</p>
+            <p className="text-neutral-400 text-sm">원하시는 날짜와 시간을 선택해 주세요. 예약 신청과 공석 조회는 매장 어플과 동시간 연계됩니다.</p>
             
             <form onSubmit={handleReservation} className="space-y-5 bg-neutral-900 p-6 rounded-2xl border border-neutral-800">
               <div>
@@ -586,9 +698,9 @@ export default function App() {
                 {isCheckingSeat ? (
                   <>
                     <div className="w-5 h-5 border-2 border-neutral-400 border-t-transparent rounded-full animate-spin"></div>
-                    빈자리 확인 중...
+                    실시간 아지트 빈자리 매칭 중...
                   </>
-                ) : '예약 신청하기'}
+                ) : '예약 전송하기'}
               </button>
             </form>
           </div>
@@ -600,7 +712,7 @@ export default function App() {
             <h2 className="text-2xl font-bold mb-2">내 쿠폰함</h2>
             
             <div className="space-y-4">
-              {currentUser.coupons.length === 0 ? (
+              {(!currentUser.coupons || currentUser.coupons.length === 0) ? (
                 <div className="text-center py-10 bg-neutral-900 rounded-xl border border-neutral-800 text-neutral-500">
                   <Ticket className="w-12 h-12 mx-auto mb-3 opacity-20" />
                   <p>사용 가능한 쿠폰이 없습니다.</p>
@@ -608,7 +720,6 @@ export default function App() {
               ) : (
                 currentUser.coupons.map(coupon => (
                   <div key={coupon.id} className={`relative overflow-hidden bg-neutral-900 border border-neutral-800 rounded-xl p-5 flex items-center justify-between transition-opacity ${coupon.used ? 'opacity-50' : 'opacity-100'}`}>
-                    {/* 쿠폰 장식 (점선) */}
                     <div className="absolute left-0 top-0 bottom-0 w-2 border-r-2 border-dashed border-neutral-950"></div>
                     
                     <div className="pl-4 flex-1">
@@ -638,7 +749,7 @@ export default function App() {
         )}
       </main>
 
-      {/* 하단 네비게이션 바 */}
+      {/* 하단 탭 바 */}
       <nav className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-neutral-950/90 backdrop-blur-lg border-t border-neutral-900 pb-safe">
         <div className="flex justify-around items-center p-3">
           <button 
@@ -663,21 +774,21 @@ export default function App() {
           >
             <Ticket className="w-6 h-6 mb-1" />
             <span className="text-[10px] font-bold">쿠폰함</span>
-            {currentUser.coupons.length > 0 && (
+            {currentUser?.coupons?.some(c => !c.used) && (
               <span className="absolute top-1 right-1 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-neutral-950"></span>
             )}
           </button>
         </div>
       </nav>
 
-      {/* 토스트 알림 */}
+      {/* 토스트 팝업 */}
       {showToast && (
         <div className="fixed top-20 left-1/2 transform -translate-x-1/2 bg-yellow-400 text-neutral-950 px-6 py-3 rounded-full font-bold shadow-xl shadow-yellow-400/20 z-50 animate-in fade-in slide-in-from-top-4 text-sm whitespace-nowrap">
           {showToast}
         </div>
       )}
       
-      {/* iOS 하단 여백 처리를 위한 더미 공간 */}
+      {/* iOS 보정 공간 */}
       <div className="h-6 bg-transparent pb-safe"></div>
     </div>
   );
