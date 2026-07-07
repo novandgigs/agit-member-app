@@ -23,10 +23,10 @@ import {
   addDoc 
 } from 'firebase/firestore';
 
-// --- Firebase 설정 및 초기화 (Canvas & 배포 통합 빌드 가드 포함) ---
+// --- Firebase 설정 및 초기화 (비어있는 apiKey 시 로컬 오프라인 자동 백업용 가드 설계) ---
 const configStr = typeof __firebase_config !== 'undefined' ? __firebase_config : null;
 const firebaseConfig = configStr ? JSON.parse(configStr) : {
-  apiKey: "", // Vercel 또는 로컬 빌드 시 런타임 자동 세팅용 빈 문자열 유지
+  apiKey: "", // 로컬 환경에서는 빈 값 유지
   authDomain: "our-azit-shared.firebaseapp.com",
   projectId: "our-azit-shared",
   storageBucket: "our-azit-shared.appspot.com",
@@ -34,12 +34,49 @@ const firebaseConfig = configStr ? JSON.parse(configStr) : {
   appId: "1:1234567890:web:abcdef"
 };
 
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
+let app, auth, db;
+let isFirebaseAvailable = false;
 
-// Sandbox 환경 앱 ID 매칭 (매장 포털 앱과 일치하는 공통 ID 사용)
+// [세이프 가드] apiKey가 유효하게 채워져 있을 때만 Firebase 엔진 가동
+if (firebaseConfig && firebaseConfig.apiKey && firebaseConfig.apiKey.trim() !== "") {
+  try {
+    app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    db = getFirestore(app);
+    isFirebaseAvailable = true;
+  } catch (error) {
+    console.warn("Firebase 초기화 중 무해한 경고 발생 (오프라인 모드로 자동 전환):", error);
+  }
+}
+
+// Sandbox 환경 앱 ID 매칭
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'our-azit-shared';
+
+// --- 오프라인용 로컬 가상 데이터베이스 초기값 설정 ---
+const getInitialMembers = () => {
+  const saved = localStorage.getItem('agit_offline_members');
+  if (saved) return JSON.parse(saved);
+  return [
+    {
+      phone: '010-1234-5678',
+      dob: '900101',
+      memberCode: 'AGIT-000001',
+      visits: 12,
+      totalHours: 25.5,
+      coupons: [
+        { id: 1, name: '평일 1시간 무료 이용권', used: false },
+        { id: 2, name: '신규 가입 환영 음료 무료 쿠폰', used: false }
+      ],
+      createdAt: Date.now()
+    }
+  ];
+};
+
+const getInitialReservations = () => {
+  const saved = localStorage.getItem('agit_offline_reservations');
+  if (saved) return JSON.parse(saved);
+  return [];
+};
 
 export default function App() {
   // --- 상태 관리 (State) ---
@@ -67,12 +104,25 @@ export default function App() {
   const [resPeople, setResPeople] = useState('2');
   const [isCheckingSeat, setIsCheckingSeat] = useState(false); // 빈자리 확인 로딩 상태
 
-  // 클라우드 실시간 연동 데이터베이스 상태 (Firestore에서 동기화됨)
-  const [membersDb, setMembersDb] = useState([]);
-  const [reservationsDb, setReservationsDb] = useState([]);
+  // 데이터베이스 통합 관리 상태 (온라인/오프라인 하이브리드)
+  const [membersDb, setMembersDb] = useState(() => getInitialMembers());
+  const [reservationsDb, setReservationsDb] = useState(() => getInitialReservations());
 
-  // --- 1. Firebase 인증 초기화 및 자동 로그인 감지 (RULE 3) ---
+  // --- 오프라인 저장용 헬퍼 함수 ---
+  const saveOfflineMembers = (newMembers) => {
+    setMembersDb(newMembers);
+    localStorage.setItem('agit_offline_members', JSON.stringify(newMembers));
+  };
+
+  const saveOfflineReservations = (newRes) => {
+    setReservationsDb(newRes);
+    localStorage.setItem('agit_offline_reservations', JSON.stringify(newRes));
+  };
+
+  // --- 1. Firebase 인증 초기화 (가드 적용) ---
   useEffect(() => {
+    if (!isFirebaseAvailable) return;
+
     const initAuth = async () => {
       try {
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
@@ -81,7 +131,7 @@ export default function App() {
           await signInAnonymously(auth);
         }
       } catch (error) {
-        console.error("Firebase auth initialization failed:", error);
+        console.warn("Firebase 익명 로그인 보류 (오프라인 정상 가동 중):", error);
       }
     };
     initAuth();
@@ -92,26 +142,25 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // --- 2. 클라우드 실시간 데이터 수신 리스너 (RULE 1 & RULE 2) ---
+  // --- 2. 클라우드 실시간 데이터 수신 리스너 (온라인일 때만 가동) ---
   useEffect(() => {
-    if (!fbUser) return;
+    if (!isFirebaseAvailable || !fbUser) return;
 
-    // RULE 1: 엄격한 Public 데이터 경로 준수
     const membersCol = collection(db, 'artifacts', appId, 'public', 'data', 'members');
     const reservationsCol = collection(db, 'artifacts', appId, 'public', 'data', 'reservations');
 
-    // 실시간 회원 목록 동기화
     const unsubMembers = onSnapshot(membersCol, (snapshot) => {
       const list = [];
       snapshot.forEach((doc) => {
         list.push({ id: doc.id, ...doc.data() });
       });
-      setMembersDb(list);
+      if (list.length > 0) {
+        setMembersDb(list);
+      }
     }, (err) => {
-      console.error("Members snapshot sync error:", err);
+      console.warn("Members 실시간 연동 일시 대기:", err);
     });
 
-    // 실시간 예약 목록 동기화
     const unsubReservations = onSnapshot(reservationsCol, (snapshot) => {
       const list = [];
       snapshot.forEach((doc) => {
@@ -119,7 +168,7 @@ export default function App() {
       });
       setReservationsDb(list);
     }, (err) => {
-      console.error("Reservations snapshot sync error:", err);
+      console.warn("Reservations 실시간 연동 일시 대기:", err);
     });
 
     return () => {
@@ -128,7 +177,7 @@ export default function App() {
     };
   }, [fbUser]);
 
-  // --- 3. 로컬 자동 로그인 복구 및 실시간 회원 데이터 자동 바인딩 ---
+  // --- 3. 로컬 자동 로그인 복구 ---
   useEffect(() => {
     const savedPhone = localStorage.getItem('agit_auto_login_phone');
     if (savedPhone && membersDb.length > 0) {
@@ -139,7 +188,7 @@ export default function App() {
     }
   }, [membersDb]);
 
-  // 실시간으로 특정 회원 데이터 정보가 Firestore에서 업데이트되면 감지하여 상태 동기화
+  // 회원 정보 데이터 실시간 자동 바인딩
   useEffect(() => {
     if (currentUser && membersDb.length > 0) {
       const updatedData = membersDb.find(m => m.phone === currentUser.phone);
@@ -170,16 +219,11 @@ export default function App() {
   // --- 핸들러 함수 ---
   const handleLogin = (e) => {
     e.preventDefault();
-    if (!fbUser) {
-      setAuthError('데이터베이스 서버와 연결 중입니다. 잠시만 기다려주세요.');
-      return;
-    }
     if (!phoneLast4 || phoneLast4.length !== 4) {
       setAuthError('핸드폰 번호 뒤 4자리를 정확히 입력해주세요.');
       return;
     }
 
-    // 뒤 4자리가 일치하는 회원을 로컬 메모리(RULE 2)에서 탐색
     const matchedUsers = membersDb.filter(u => u.phone.endsWith(phoneLast4));
     
     if (matchedUsers.length === 1) {
@@ -191,15 +235,14 @@ export default function App() {
       }
       displayToast('다시 오신 것을 환영합니다!');
     } else if (matchedUsers.length > 1) {
-      setAuthError('중복된 번호가 검색되었습니다. 전체 가입을 진행하시거나 매장에 문의해 주세요.');
+      setAuthError('중복된 번호가 검색되었습니다. 전체번호로 회원가입을 하거나 매장에 문의해 주세요.');
     } else {
-      setAuthError('일치하는 회원 정보가 없습니다. 가입하지 않으셨다면 회원가입을 먼저 해주세요.');
+      setAuthError('일치하는 회원 정보가 없습니다. 회원가입을 먼저 진행해 주세요.');
     }
   };
 
   const handleSignup = async (e) => {
     e.preventDefault();
-    if (!fbUser) return;
     if (!phone || !dob) {
       setAuthError('핸드폰 번호와 생년월일을 모두 입력해주세요.');
       return;
@@ -209,7 +252,6 @@ export default function App() {
       return;
     }
 
-    // 중복 가입 체크
     const existingUser = membersDb.find(u => u.phone === phone);
     if (existingUser) {
       setAuthError('이미 가입 완료된 번호입니다. 로그인해주세요.');
@@ -230,20 +272,29 @@ export default function App() {
       createdAt: Date.now()
     };
     
-    try {
-      // RULE 1: 엄격한 데이터 저장 경로 지정
-      const memberDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'members', newUserPhone);
-      await setDoc(memberDocRef, newMember);
-      
+    if (isFirebaseAvailable) {
+      try {
+        const memberDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'members', newUserPhone);
+        await setDoc(memberDocRef, newMember);
+        setCurrentUser(newMember);
+        setAuthError('');
+        if (autoLogin) {
+          localStorage.setItem('agit_auto_login_phone', newUserPhone);
+        }
+        displayToast('웰컴 쿠폰 발급이 완료되었습니다! (클라우드 전송됨)');
+      } catch (err) {
+        console.error("Firebase member save failed:", err);
+        setAuthError('서버 연결 실패. 잠시 후 가입해 주세요.');
+      }
+    } else {
+      const updated = [...membersDb, newMember];
+      saveOfflineMembers(updated);
       setCurrentUser(newMember);
       setAuthError('');
       if (autoLogin) {
         localStorage.setItem('agit_auto_login_phone', newUserPhone);
       }
-      displayToast('환영합니다! 회원가입 및 웰컴 쿠폰 발급이 완료되었습니다.');
-    } catch (err) {
-      console.error("Error creating member document:", err);
-      setAuthError('회원 등록에 실패했습니다. 다시 시도해 주세요.');
+      displayToast('환영합니다! (로컬 오프라인 모드로 신속히 가입되었습니다.)');
     }
   };
 
@@ -255,25 +306,32 @@ export default function App() {
     setDob('');
     setAgreed(false);
     setAutoLogin(false);
-    localStorage.removeItem('agit_auto_login_phone'); // 자동 로그인 정보 파기
+    localStorage.removeItem('agit_auto_login_phone');
     displayToast('로그아웃 되었습니다.');
   };
 
-  // [실시간 호환 테스트용] 매장 포스기 시뮬레이션용 승인 처리 함수
   const handleApproveReservation = async (resId) => {
-    try {
-      const resDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'reservations', resId);
-      await updateDoc(resDocRef, { status: '확정' });
-      displayToast('클라우드 서버에 승인 상태를 업데이트했습니다!');
-    } catch (err) {
-      console.error("Error approving reservation:", err);
-      displayToast('예약 승인 업데이트에 실패했습니다.');
+    if (isFirebaseAvailable) {
+      try {
+        const resDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'reservations', resId);
+        await updateDoc(resDocRef, { status: '확정' });
+        displayToast('클라우드 서버에 승인 상태를 업데이트했습니다!');
+      } catch (err) {
+        console.error("Error approving reservation:", err);
+        displayToast('예약 승인 실패');
+      }
+    } else {
+      const updated = reservationsDb.map(res => 
+        res.id === resId ? { ...res, status: '확정' } : res
+      );
+      saveOfflineReservations(updated);
+      displayToast('예약이 확정되었습니다! (로컬 가상 확정)');
     }
   };
 
   const handleReservation = async (e) => {
     e.preventDefault();
-    if (!fbUser || !currentUser) return;
+    if (!currentUser) return;
     
     setIsCheckingSeat(true);
     displayToast('실시간 아지트 테이블 공석 상태를 조회 중입니다...');
@@ -283,31 +341,38 @@ export default function App() {
       
       const dateStr = `2026년 ${resMonth}월 ${resDay}일`;
       const timeStr = `${resHour}:${resMinute}`;
+      const uniqueId = String(Date.now());
       
       const newRes = {
+        id: uniqueId,
         memberPhone: currentUser.phone,
         memberCode: currentUser.memberCode,
         date: dateStr,
         time: timeStr,
         people: resPeople,
-        status: '대기 중', // 매장 관리자 앱에서 승인 시 '확정'으로 동기화됨
+        status: '대기 중',
         createdAt: Date.now()
       };
 
-      try {
-        const reservationsCol = collection(db, 'artifacts', appId, 'public', 'data', 'reservations');
-        await addDoc(reservationsCol, newRes);
-        
-        displayToast('예약 신청 완료! 매장 관리 어플에 실시간 알림이 전송되었습니다.');
+      if (isFirebaseAvailable) {
+        try {
+          const reservationsCol = collection(db, 'artifacts', appId, 'public', 'data', 'reservations');
+          await addDoc(reservationsCol, newRes);
+          displayToast('예약 신청 완료! 매장 어플로 실시간 알림을 보냈습니다.');
+          setCurrentView('home');
+        } catch (err) {
+          console.error("Error booking reservation:", err);
+          displayToast('예약 전송 중 오류가 발생했습니다.');
+        }
+      } else {
+        const updated = [...reservationsDb, newRes];
+        saveOfflineReservations(updated);
+        displayToast('예약 완료! (로컬 오프라인 저장 완료)');
         setCurrentView('home');
-      } catch (err) {
-        console.error("Error booking reservation:", err);
-        displayToast('예약 전송 도중 오류가 발생했습니다.');
       }
     }, 1500);
   };
 
-  // 쿠폰 사용 처리 핸들러 (실시간 클라우드 DB 동기화)
   const handleUseCoupon = async (couponId) => {
     if (!window.confirm('직원 확인용 버튼입니다. 사용 완료 시 복구가 불가능합니다. 사용하시겠습니까?')) return;
     
@@ -315,17 +380,26 @@ export default function App() {
       c.id === couponId ? { ...c, used: true } : c
     );
     
-    try {
-      const memberDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'members', currentUser.phone);
-      await updateDoc(memberDocRef, { coupons: updatedCoupons });
-      displayToast('쿠폰 사용 정보가 실시간 동기화되었습니다.');
-    } catch (err) {
-      console.error("Error using coupon:", err);
-      displayToast('쿠폰 상태 업데이트 실패');
+    if (isFirebaseAvailable) {
+      try {
+        const memberDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'members', currentUser.phone);
+        await updateDoc(memberDocRef, { coupons: updatedCoupons });
+        displayToast('쿠폰 사용 정보가 실시간 동기화되었습니다.');
+      } catch (err) {
+        console.error("Error using coupon:", err);
+        displayToast('쿠폰 상태 동기화 실패');
+      }
+    } else {
+      const updatedMembers = membersDb.map(m => 
+        m.phone === currentUser.phone ? { ...m, coupons: updatedCoupons } : m
+      );
+      saveOfflineMembers(updatedMembers);
+      setCurrentUser({ ...currentUser, coupons: updatedCoupons });
+      displayToast('쿠폰을 오프라인에서 무사히 사용했습니다.');
     }
   };
 
-  // 현재 사용자의 실시간 예약 건 필터링 (RULE 2: In-Memory 필터)
+  // 현재 로그인 회원의 예약만 필터링
   const myReservations = reservationsDb
     .filter(res => res.memberPhone === currentUser?.phone)
     .sort((a, b) => b.createdAt - a.createdAt);
@@ -333,8 +407,6 @@ export default function App() {
   const tierInfo = currentUser ? getTier(currentUser.totalHours) : { name: 'BRONZE', color: 'text-orange-400' };
 
   // --- 화면 렌더링 ---
-
-  // 1. 로그인/회원가입 인증 화면
   if (!currentUser) {
     return (
       <div className="min-h-screen bg-neutral-950 text-white flex flex-col justify-center items-center p-6 font-sans">
@@ -345,7 +417,6 @@ export default function App() {
           </div>
 
           {authMode === 'login' ? (
-            // --- 로그인 폼 ---
             <form onSubmit={handleLogin} className="bg-neutral-900 p-6 rounded-2xl shadow-xl space-y-5 border border-neutral-800 animate-in fade-in zoom-in duration-300">
               <div>
                 <label className="block text-sm font-medium text-neutral-300 mb-1">핸드폰 번호 뒤 4자리</label>
@@ -401,7 +472,6 @@ export default function App() {
               </div>
             </form>
           ) : (
-            // --- 회원가입 폼 ---
             <form onSubmit={handleSignup} className="bg-neutral-900 p-6 rounded-2xl shadow-xl space-y-5 border border-neutral-800 animate-in fade-in zoom-in duration-300">
               <div>
                 <label className="block text-sm font-medium text-neutral-300 mb-1">핸드폰 번호</label>
@@ -488,7 +558,6 @@ export default function App() {
     );
   }
 
-  // --- 메인 홈화면 레이아웃 ---
   return (
     <div className="min-h-screen bg-neutral-950 text-white font-sans max-w-md mx-auto relative pb-24 shadow-2xl">
       
@@ -523,7 +592,6 @@ export default function App() {
 
               {/* 가상의 바코드 영역 */}
               <div className="w-full h-16 bg-white/10 rounded-lg flex flex-col justify-center items-center mb-6">
-                 {/* CSS 바코드 패턴 */}
                  <div className="w-full h-10 flex px-4 items-center justify-between opacity-80">
                     {[...Array(40)].map((_, i) => (
                       <div key={i} className={`h-full bg-white ${Math.random() > 0.5 ? 'w-0.5' : (Math.random() > 0.8 ? 'w-1.5' : 'w-1')}`}></div>
@@ -543,16 +611,22 @@ export default function App() {
               </div>
             </div>
 
-            {/* 이벤트 알림 */}
+            {/* 상태 알림 알림 */}
             <div className="bg-yellow-400 text-neutral-950 rounded-xl p-4 flex items-center justify-between cursor-pointer hover:bg-yellow-300 transition-colors shadow-lg shadow-yellow-400/10">
               <div>
-                <p className="font-bold text-sm mb-0.5">🎉 실시간 클라우드 가동 중</p>
-                <p className="text-xs font-medium opacity-80">이 화면은 포스기 관리자 대시보드와 유기적으로 동기화됩니다.</p>
+                <p className="font-bold text-sm mb-0.5">
+                  {isFirebaseAvailable ? "🎉 실시간 클라우드 가동 중" : "📲 로컬 안전 모드 활성화"}
+                </p>
+                <p className="text-xs font-medium opacity-80">
+                  {isFirebaseAvailable 
+                    ? "매장 관리자 대시보드와 모든 데이터가 실시간 연계됩니다." 
+                    : "인터넷이 없어도 모든 기능이 Local 저장소 기반으로 완벽히 작동합니다."}
+                </p>
               </div>
               <ChevronRight className="w-5 h-5" />
             </div>
 
-            {/* 내 예약 내역 (실시간 동기화 상태) */}
+            {/* 내 예약 내역 */}
             {myReservations.length > 0 && (
               <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5">
                 <h3 className="text-sm font-bold text-neutral-300 mb-3 flex items-center gap-2">
@@ -569,14 +643,14 @@ export default function App() {
                         </div>
                         <span className={`px-3 py-1 text-xs font-bold rounded-full border ${
                           res.status === '확정' 
-                            ? 'bg-yellow-400/20 text-yellow-400 border-yellow-400/30 animate-pulse' 
+                            ? 'bg-yellow-400/20 text-yellow-400 border-yellow-400/30' 
                             : 'bg-neutral-800 text-neutral-400 border-neutral-600'
                         }`}>
                           {res.status === '확정' ? '예약 확정' : '승인 대기 중'}
                         </span>
                       </div>
                       
-                      {/* [실시간 확인을 위한 매장용 승인 시뮬레이션 버튼] */}
+                      {/* 매장용 승인 시뮬레이션 버튼 */}
                       {res.status !== '확정' && (
                         <button
                           onClick={() => handleApproveReservation(res.id)}
