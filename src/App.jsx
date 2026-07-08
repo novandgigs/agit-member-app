@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 
-// --- Firebase Web SDK 임포트 ---
+// --- Firebase Web SDK 임포트 (버전 호환성을 위해 Lucide 외부 임포트 완전 제거) ---
 import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
@@ -43,8 +43,7 @@ if (firebaseConfig && firebaseConfig.apiKey && firebaseConfig.apiKey.trim() !== 
   }
 }
 
-// [공통 앱 ID 연동 - Permission 및 세그먼트 매칭 해결]
-// 매장용 포탈과 똑같이 슬래시(/) 앞부분의 승인된 컨테이너 ID 세그먼트만 추출합니다.
+// [공통 앱 ID 연동] 매장 관리 포스기 어플과 정확하게 상호 일치하는 경로 생성
 const globalAppId = typeof __app_id !== 'undefined' ? String(__app_id) : 'our-azit-shared';
 const appId = globalAppId.includes('/') ? 'our-azit-shared' : globalAppId.replace(/[^a-zA-Z0-9_-]/g, '_');
 
@@ -74,7 +73,7 @@ const getInitialReservations = () => {
   return [];
 };
 
-// --- 안전한 UI 렌더링을 위한 자체 제작 인라인 SVG 아이콘 컴포넌트군 ---
+// --- [안정성 극대화] React Child Object 렌더링 에러 방지용 자체 인라인 SVG 아이콘 컴포넌트군 ---
 function HomeIcon({ className }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -141,6 +140,15 @@ function CheckCircle2({ className }) {
   );
 }
 
+function BookOpenIcon({ className }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+      <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+    </svg>
+  );
+}
+
 export default function App() {
   // --- 상태 관리 (State) ---
   const [fbUser, setFbUser] = useState(null); 
@@ -148,14 +156,20 @@ export default function App() {
   const [currentView, setCurrentView] = useState('home'); // home | reservation | coupon
   const [showToast, setShowToast] = useState('');
   
-  // 인증 및 폼 입력 상태
+  // 인증 및 로그인 상태
   const [authMode, setAuthMode] = useState('login');
   const [authError, setAuthError] = useState('');
   const [phoneLast4, setPhoneLast4] = useState('');
   const [autoLogin, setAutoLogin] = useState(false);
+  
+  // 가입 폼 상태
   const [phone, setPhone] = useState('');
-  const [dob, setDob] = useState('');
   const [agreed, setAgreed] = useState(false);
+
+  // 생년월일 드롭다운용 폼 상태
+  const [birthYear, setBirthYear] = useState('1995');
+  const [birthMonth, setBirthMonth] = useState('01');
+  const [birthDay, setBirthDay] = useState('01');
 
   // 예약 신청 상태 (fixed 2026)
   const [resMonth, setResMonth] = useState('07');
@@ -168,6 +182,11 @@ export default function App() {
   // 데이터 통합 관리 상태
   const [membersDb, setMembersDb] = useState(() => getInitialMembers());
   const [reservationsDb, setReservationsDb] = useState(() => getInitialReservations());
+
+  // 드롭다운 리스트 범위 생성
+  const years = Array.from({ length: 77 }, (_, i) => String(1940 + i)); // 1940년 ~ 2016년 선택 지원
+  const months = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, '0'));
+  const days = Array.from({ length: 31 }, (_, i) => String(i + 1).padStart(2, '0'));
 
   // --- 로컬 오프라인 데이터 수동 백업 저장 장치 ---
   const saveOfflineMembers = (newMembers) => {
@@ -249,15 +268,23 @@ export default function App() {
     }
   }, [membersDb]);
 
-  // 점주 포탈에서 회원 마일리지를 정산하면 손님 폰에서 실시간 감지하여 자동 카드 갱신
+  // [수정 핵심 - 무한 렌더링 루프 방지]: 포스기에서 정산 변경 시 상태를 업데이트하되, 리액트 무한 바인딩 루프를 완벽 차단합니다.
   useEffect(() => {
     if (currentUser && membersDb.length > 0) {
       const updatedData = membersDb.find(m => m.phone === currentUser.phone);
       if (updatedData) {
-        setCurrentUser(updatedData);
+        const isChanged = 
+          updatedData.visits !== currentUser.visits || 
+          updatedData.totalHours !== currentUser.totalHours || 
+          JSON.stringify(updatedData.coupons) !== JSON.stringify(currentUser.coupons) ||
+          updatedData.memberCode !== currentUser.memberCode;
+
+        if (isChanged) {
+          setCurrentUser(updatedData);
+        }
       }
     }
-  }, [membersDb, currentUser]);
+  }, [membersDb]); // currentUser를 제거하여 리렌더링 잠금 오류를 완벽히 해결합니다.
 
   // --- 유틸리티 함수 ---
   const displayToast = (msg) => {
@@ -304,8 +331,8 @@ export default function App() {
 
   const handleSignup = async (e) => {
     e.preventDefault();
-    if (!phone || !dob) {
-      setAuthError('핸드폰 번호와 생년월일을 모두 입력해주세요.');
+    if (!phone) {
+      setAuthError('핸드폰 번호를 입력해주세요.');
       return;
     }
     if (!agreed) {
@@ -319,10 +346,12 @@ export default function App() {
       return;
     }
     
+    // 생년월일 조합 가공 (YYMMDD 형식)
+    const combinedDob = `${birthYear.slice(-2)}${birthMonth}${birthDay}`;
     const newUserPhone = phone.trim();
     const newMember = {
       phone: newUserPhone,
-      dob,
+      dob: combinedDob,
       memberCode: generateMemberCode(),
       visits: 0,
       totalHours: 0,
@@ -364,7 +393,6 @@ export default function App() {
     setCurrentView('home');
     setPhoneLast4('');
     setPhone('');
-    setDob('');
     setAgreed(false);
     setAutoLogin(false);
     localStorage.removeItem('agit_auto_login_phone');
@@ -463,7 +491,7 @@ export default function App() {
                 <label className="block text-sm font-bold text-neutral-300 mb-2">핸드폰 번호 뒤 4자리</label>
                 <input 
                   type="number" 
-                  placeholder="예: 5678" 
+                  placeholder="번호 뒤 4자리 입력" 
                   value={phoneLast4}
                   onChange={(e) => setPhoneLast4(e.target.value)}
                   className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-yellow-400 transition-colors tracking-widest text-lg font-mono font-bold"
@@ -517,7 +545,7 @@ export default function App() {
             // --- 회원가입 폼 ---
             <form onSubmit={handleSignup} className="bg-neutral-900 p-6 rounded-2xl shadow-xl space-y-5 border border-neutral-800 animate-in fade-in zoom-in duration-300">
               <div>
-                <label className="block text-sm font-bold text-neutral-300 mb-1">핸드폰 번호</label>
+                <label className="block text-sm font-bold text-neutral-300 mb-2">핸드폰 번호</label>
                 <input 
                   type="tel" 
                   placeholder="010-0000-0000" 
@@ -527,16 +555,39 @@ export default function App() {
                   required
                 />
               </div>
+
+              {/* [요청 2 반영]: 생년월일을 직관적인 년/월/일 드롭다운형 선택 상자로 배치 */}
               <div>
-                <label className="block text-sm font-bold text-neutral-300 mb-1">생년월일 6자리</label>
-                <input 
-                  type="number" 
-                  placeholder="YYMMDD (예: 980706)" 
-                  value={dob}
-                  onChange={(e) => setDob(e.target.value)}
-                  className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-yellow-400 transition-colors font-mono font-bold"
-                  required
-                />
+                <label className="block text-sm font-bold text-neutral-300 mb-2">생년월일</label>
+                <div className="grid grid-cols-3 gap-2">
+                  <select
+                    value={birthYear}
+                    onChange={(e) => setBirthYear(e.target.value)}
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-2.5 text-xs text-white focus:outline-none focus:border-yellow-400"
+                  >
+                    {years.map(y => (
+                      <option key={y} value={y}>{y}년</option>
+                    ))}
+                  </select>
+                  <select
+                    value={birthMonth}
+                    onChange={(e) => setBirthMonth(e.target.value)}
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-2.5 text-xs text-white focus:outline-none focus:border-yellow-400"
+                  >
+                    {months.map(m => (
+                      <option key={m} value={m}>{Number(m)}월</option>
+                    ))}
+                  </select>
+                  <select
+                    value={birthDay}
+                    onChange={(e) => setBirthDay(e.target.value)}
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-2.5 text-xs text-white focus:outline-none focus:border-yellow-400"
+                  >
+                    {days.map(d => (
+                      <option key={d} value={d}>{Number(d)}일</option>
+                    ))}
+                  </select>
+                </div>
               </div>
               
               <label className="flex items-start gap-3 cursor-pointer group">
@@ -734,7 +785,7 @@ export default function App() {
                   rel="noopener noreferrer"
                   className="flex flex-col items-center justify-center gap-2 bg-neutral-900 hover:bg-neutral-850 p-4 rounded-xl border border-neutral-850 transition-colors text-center text-neutral-300 hover:text-white"
                 >
-                  <BookOpen className="w-5 h-5 text-green-500" />
+                  <BookOpenIcon className="w-5 h-5 text-green-500" />
                   <span className="text-[10px] font-bold">네이버 블로그</span>
                 </a>
               </div>
